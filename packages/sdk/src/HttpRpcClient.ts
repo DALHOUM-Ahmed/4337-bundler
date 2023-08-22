@@ -49,10 +49,11 @@ export class HttpRpcClient {
 
   /**
    * estimate gas requirements for UserOperation
+   * @todo change verificationGas to verificationGasLimit when the tests in the bundler are changed
    * @param userOp1
    * @returns latest gas suggestions made by the bundler.
    */
-  async estimateUserOpGas (userOp1: Partial<UserOperationStruct>): Promise<{callGasLimit: number, preVerificationGas: number, verificationGasLimit: number}> {
+  async estimateUserOpGas (userOp1: Partial<UserOperationStruct>): Promise<{callGasLimit: number, preVerificationGas: number, verificationGas: number}> {
     await this.initializing
     const hexifiedUserOp = deepHexlify(await resolveProperties(userOp1))
     const jsonRequestData: [UserOperationStruct, string] = [hexifiedUserOp, this.entryPointAddress]

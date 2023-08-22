@@ -33,7 +33,7 @@ export class BundlerServer {
     readonly debugHandler: DebugMethodHandler,
     readonly config: BundlerConfig,
     readonly provider: Provider,
-    readonly wallet: Signer
+    readonly wallet: Wallet
   ) {
     this.app = express();
     this.app.use(cors());

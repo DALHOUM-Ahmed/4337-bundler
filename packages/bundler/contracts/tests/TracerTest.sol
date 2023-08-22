@@ -65,14 +65,5 @@ contract TracerTest {
         }
         this.revertWithMessage{gas : gas}();
     }
-
-    event BeforeExecution();
-
-    function testStopTracing() public {
-        this.callTimeStamp();
-        this.callTimeStamp();
-        emit BeforeExecution();
-        this.callTimeStamp();
-    }
 }
 
