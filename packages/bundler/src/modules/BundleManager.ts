@@ -242,6 +242,20 @@ export class BundleManager {
         console.log("241");
         continue;
       }
+
+      for (const storageAddress of Object.keys(validationResult.storageMap)) {
+        if (
+          storageAddress.toLowerCase() !== entry.userOp.sender.toLowerCase() &&
+          knownSenders.includes(storageAddress.toLowerCase())
+        ) {
+          console.debug(
+            `UserOperation from ${entry.userOp.sender} sender accessed a storage of another known sender ${storageAddress}`
+          );
+          // eslint-disable-next-line no-labels
+          continue mainLoop;
+        }
+      }
+
       // todo: we take UserOp's callGasLimit, even though it will probably require less (but we don't
       // attempt to estimate it to check)
       // which means we could "cram" more UserOps into a bundle.

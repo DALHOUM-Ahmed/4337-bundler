@@ -1,5 +1,5 @@
 import {
-  EntryPoint,
+  EntryPoint, IAccount__factory,
   IEntryPoint__factory,
   IPaymaster__factory, SenderCreator__factory
 } from '@account-abstraction/contracts'
@@ -98,6 +98,7 @@ function parseCallStack (tracerResults: BundlerCollectorReturn): CallEntry[] {
               to: top.to,
               from: top.from,
               type: top.type,
+              value: top.value,
               method: method.name ?? method,
               return: ret
             })
@@ -153,6 +154,13 @@ function parseEntitySlots (stakeInfoEntities: { [addr: string]: StakeInfo | unde
   return entitySlots
 }
 
+// method-signature for calls from entryPoint
+const callsFromEntryPointMethodSigs: {[key: string]: string} = {
+  factory: SenderCreator__factory.createInterface().getSighash('createSender'),
+  account: IAccount__factory.createInterface().getSighash('validateUserOp'),
+  paymaster: IPaymaster__factory.createInterface().getSighash('validatePaymasterUserOp')
+}
+
 /**
  * parse collected simulation traces and revert if they break our rules
  * @param userOp the userOperation that was used in this simulation
@@ -170,10 +178,8 @@ export function parseScannerResult (userOp: UserOperation, tracerResults: Bundle
   const bannedOpCodes = new Set(['GASPRICE', 'GASLIMIT', 'DIFFICULTY', 'TIMESTAMP', 'BASEFEE', 'BLOCKHASH', 'NUMBER', 'SELFBALANCE', 'BALANCE', 'ORIGIN', 'GAS', 'CREATE', 'COINBASE', 'SELFDESTRUCT', 'RANDOM', 'PREVRANDAO'])
 
   // eslint-disable-next-line @typescript-eslint/no-base-to-string
-  if (Object.values(tracerResults.numberLevels).length < 2) {
-    // console.log('calls=', result.calls.map(x=>JSON.stringify(x)).join('\n'))
-    // console.log('debug=', result.debug)
-    throw new Error('Unexpected traceCall result: no NUMBER opcodes, and not REVERT')
+  if (Object.values(tracerResults.callsFromEntryPoint).length < 1) {
+    throw new Error('Unexpected traceCall result: no calls from entrypoint.')
   }
   const callStack = parseCallStack(tracerResults)
 
@@ -185,9 +191,12 @@ export function parseScannerResult (userOp: UserOperation, tracerResults: Bundle
     ValidationErrors.OpcodeValidation
   )
 
+  const illegalNonZeroValueCall = callStack.find(
+    call =>
+      call.to !== entryPointAddress &&
+      !BigNumber.from(call.value ?? 0).eq(0))
   requireCond(
-    callStack.find(call => call.to !== entryPointAddress &&
-      BigNumber.from(call.value ?? 0) !== BigNumber.from(0)) != null,
+    illegalNonZeroValueCall == null,
     'May not may CALL with value',
     ValidationErrors.OpcodeValidation)
 
@@ -202,9 +211,16 @@ export function parseScannerResult (userOp: UserOperation, tracerResults: Bundle
 
   const entitySlots: { [addr: string]: Set<string> } = parseEntitySlots(stakeInfoEntities, tracerResults.keccak)
 
-  Object.entries(stakeInfoEntities).forEach(([entityTitle, entStakes], index) => {
-    const entityAddr = entStakes?.addr ?? ''
-    const currentNumLevel = tracerResults.numberLevels[index]
+  Object.entries(stakeInfoEntities).forEach(([entityTitle, entStakes]) => {
+    const entityAddr = (entStakes?.addr ?? '').toLowerCase()
+    const currentNumLevel = tracerResults.callsFromEntryPoint.find(info => info.topLevelMethodSig === callsFromEntryPointMethodSigs[entityTitle])
+    if (currentNumLevel == null) {
+      if (entityTitle === 'account') {
+        // should never happen... only factory, paymaster are optional.
+        throw new Error('missing trace into validateUserOp')
+      }
+      return
+    }
     const opcodes = currentNumLevel.opcodes
     const access = currentNumLevel.access
 
@@ -274,7 +290,10 @@ export function parseScannerResult (userOp: UserOperation, tracerResults: Bundle
         // but during initial UserOp (where there is an initCode), it is allowed only for staked entity
         if (associatedWith(slot, sender, entitySlots)) {
           if (userOp.initCode.length > 2) {
-            requireStakeSlot = slot
+            // special case: account.validateUserOp is allowed to use assoc storage if factory is staked.
+            if (!(entityAddr === sender && isStaked(stakeInfoEntities.factory))) {
+              requireStakeSlot = slot
+            }
           }
         } else if (associatedWith(slot, entityAddr, entitySlots)) {
           // accessing a slot associated with entityAddr (e.g. token.balanceOf(paymaster)
@@ -311,28 +330,54 @@ export function parseScannerResult (userOp: UserOperation, tracerResults: Bundle
         'unstaked paymaster must not return context')
     }
 
+    // check if the given entity is staked
+    function isStaked (entStake?: StakeInfo): boolean {
+      return entStake != null && BigNumber.from(1).lte(entStake.stake) && BigNumber.from(1).lte(entStake.unstakeDelaySec)
+    }
+
     // helper method: if condition is true, then entity must be staked.
     function requireCondAndStake (cond: boolean, entStake: StakeInfo | undefined, failureMessage: string): void {
       if (!cond) {
         return
       }
-      if (entStakes == null) {
+      if (entStake == null) {
         throw new Error(`internal: ${entityTitle} not in userOp, but has storage accesses in ${JSON.stringify(access)}`)
       }
-      requireCond(BigNumber.from(1).lt(entStakes.stake) && BigNumber.from(1).lt(entStakes.unstakeDelaySec),
+      requireCond(isStaked(entStake),
         failureMessage, ValidationErrors.OpcodeValidation, { [entityTitle]: entStakes?.addr })
 
       // TODO: check real minimum stake values
     }
 
-    requireCond(Object.keys(currentNumLevel.contractSize).find(addr => currentNumLevel.contractSize[addr] <= 2) == null,
-      `${entityTitle} accesses un-deployed contract ${JSON.stringify(currentNumLevel.contractSize)}`, ValidationErrors.OpcodeValidation)
+    // the only contract we allow to access before its deployment is the "sender" itself, which gets created.
+    let illegalZeroCodeAccess: any
+    for (const addr of Object.keys(currentNumLevel.contractSize)) {
+      if (addr !== sender && currentNumLevel.contractSize[addr].contractSize <= 2) {
+        illegalZeroCodeAccess = currentNumLevel.contractSize[addr]
+        illegalZeroCodeAccess.address = addr
+        break
+      }
+    }
+    requireCond(
+      illegalZeroCodeAccess == null,
+      `${entityTitle} accesses un-deployed contract address ${illegalZeroCodeAccess?.address as string} with opcode ${illegalZeroCodeAccess?.opcode as string}`, ValidationErrors.OpcodeValidation)
+
+    let illegalEntryPointCodeAccess
+    for (const addr of Object.keys(currentNumLevel.extCodeAccessInfo)) {
+      if (addr === entryPointAddress) {
+        illegalEntryPointCodeAccess = currentNumLevel.extCodeAccessInfo[addr]
+        break
+      }
+    }
+    requireCond(
+      illegalEntryPointCodeAccess == null,
+      `${entityTitle} accesses EntryPoint contract address ${entryPointAddress} with opcode ${illegalEntryPointCodeAccess}`, ValidationErrors.OpcodeValidation)
   })
 
   // return list of contract addresses by this UserOp. already known not to contain zero-sized addresses.
-  const addresses = tracerResults.numberLevels.flatMap(level => Object.keys(level.contractSize))
+  const addresses = tracerResults.callsFromEntryPoint.flatMap(level => Object.keys(level.contractSize))
   const storageMap: StorageMap = {}
-  tracerResults.numberLevels.forEach(level => {
+  tracerResults.callsFromEntryPoint.forEach(level => {
     Object.keys(level.access).forEach(addr => {
       storageMap[addr] = storageMap[addr] ?? level.access[addr].reads
     })

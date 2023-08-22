@@ -137,7 +137,7 @@ export class UserOpMethodHandler {
 
   /**
    * eth_estimateUserOperationGas RPC api.
-   * @param userOp1
+   * @param userOp1 input userOp (may have gas fields missing, so they can be estimated)
    * @param entryPointInput
    */
   async estimateUserOperationGas(
@@ -198,7 +198,7 @@ export class UserOpMethodHandler {
     const verificationGas = BigNumber.from(preOpGas).toNumber();
     return {
       preVerificationGas,
-      verificationGas,
+      verificationGasLimit,
       validAfter,
       validUntil,
       callGasLimit,
